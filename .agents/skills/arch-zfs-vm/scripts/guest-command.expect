@@ -1,0 +1,87 @@
+#!/usr/bin/expect -f
+set timeout 1200
+
+set qemu [lindex $argv 0]
+set firmware [lindex $argv 1]
+set disk [lindex $argv 2]
+set guest_command [lindex $argv 3]
+set user_name [lindex $argv 4]
+set user_password [lindex $argv 5]
+set hostname [lindex $argv 6]
+set serial [lindex $argv 7]
+
+if {$user_name eq ""} {
+  set user_name "arch"
+}
+if {$user_password eq ""} {
+  set user_password "arch"
+}
+if {$hostname eq ""} {
+  set hostname "arch-zfs"
+}
+if {$serial eq ""} {
+  set serial "arch-zfs-root"
+}
+
+log_user 1
+
+spawn $qemu \
+  -enable-kvm \
+  -machine q35 \
+  -cpu host \
+  -smp 4 \
+  -m 8192 \
+  -boot order=c,menu=off \
+  -nographic \
+  -no-reboot \
+  -drive if=pflash,format=raw,readonly=on,file=$firmware \
+  -drive if=none,id=vdisk,file=$disk,format=qcow2,cache=writeback,discard=unmap \
+  -device virtio-blk-pci,drive=vdisk,serial=$serial,bootindex=0 \
+  -nic user,model=virtio-net-pci
+
+expect {
+  -re "$hostname login:" {
+    send "$user_name\r"
+  }
+  timeout {
+    puts "Timed out waiting for installed VM login prompt"
+    exit 1
+  }
+}
+
+expect {
+  -re {Password:} {
+    send "$user_password\r"
+  }
+  timeout {
+    puts "Timed out waiting for password prompt"
+    exit 1
+  }
+}
+
+expect {
+  -re {\$ } {}
+  timeout {
+    puts "Timed out waiting for user shell"
+    exit 1
+  }
+}
+
+send "($guest_command); rc=\$?; printf '\\n__COMMAND_EXIT:%s__\\n' \$rc\r"
+
+set timeout 1800
+expect {
+  -re {__COMMAND_EXIT:0__} {
+    send "sudo poweroff\r"
+  }
+  -re {__COMMAND_EXIT:([1-9][0-9]*)__} {
+    puts "Guest command failed"
+    exit 1
+  }
+  timeout {
+    puts "Timed out waiting for guest command completion"
+    exit 1
+  }
+}
+
+expect eof

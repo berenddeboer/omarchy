@@ -1,0 +1,79 @@
+#!/usr/bin/expect -f
+set timeout 1800
+
+set qemu [lindex $argv 0]
+set firmware [lindex $argv 1]
+set kernel [lindex $argv 2]
+set initrd [lindex $argv 3]
+set arch_iso [lindex $argv 4]
+set seed_iso [lindex $argv 5]
+set disk [lindex $argv 6]
+set log_path [lindex $argv 7]
+
+if {$log_path ne ""} {
+  log_file $log_path
+}
+log_user 0
+
+puts "Booting ArchZFS installer VM"
+if {$log_path ne ""} {
+  puts "Detailed console log: $log_path"
+}
+
+spawn $qemu \
+  -enable-kvm \
+  -machine q35 \
+  -cpu host \
+  -smp 4 \
+  -m 8192 \
+  -nographic \
+  -no-reboot \
+  -drive if=pflash,format=raw,readonly=on,file=$firmware \
+  -drive if=none,id=vdisk,file=$disk,format=qcow2,cache=writeback,discard=unmap \
+  -device virtio-blk-pci,drive=vdisk,serial=omarchy-zfs-root \
+  -drive if=none,id=archiso,file=$arch_iso,format=raw,media=cdrom,readonly=on \
+  -device ide-cd,drive=archiso,bus=ide.0 \
+  -drive if=none,id=seed,file=$seed_iso,format=raw,media=cdrom,readonly=on \
+  -device ide-cd,drive=seed,bus=ide.1 \
+  -kernel $kernel \
+  -initrd $initrd \
+  -append "archisobasedir=arch archisolabel=Archzfs_20260401_2220 cow_spacesize=4G console=ttyS0,115200n8"
+
+expect {
+  -re {archiso login:} {
+    send "root\r"
+    exp_continue
+  }
+  -re {Password:} {
+    send "\r"
+    exp_continue
+  }
+  -re {# } {}
+  timeout {
+    puts "Timed out waiting for Arch ISO root shell"
+    exit 1
+  }
+}
+
+send "mkdir -p /mnt/seed && mount /dev/sr1 /mnt/seed && bash /mnt/seed/install-arch-zfs-limine.sh >/tmp/omarchy-install.log 2>&1; rc=\$?; if test \$rc -ne 0; then printf '\\n__INSTALL_LOG_TAIL__\\n'; tail -200 /tmp/omarchy-install.log; fi; printf '\\n__INSTALL_EXIT:%s__\\n' \$rc\r"
+puts "Running guest install script"
+log_user 1
+set timeout 7200
+
+expect {
+  -re {__INSTALL_EXIT:0__} {
+    puts "Guest install script completed successfully"
+    send "poweroff\r"
+  }
+  -re {__INSTALL_EXIT:([1-9][0-9]*)__} {
+    puts "Installer failed inside the live ISO"
+    exit 1
+  }
+  timeout {
+    puts "Timed out waiting for install completion"
+    exit 1
+  }
+  eof {}
+}
+
+expect eof

@@ -1,0 +1,89 @@
+#!/usr/bin/expect -f
+set timeout 1200
+
+set qemu [lindex $argv 0]
+set firmware [lindex $argv 1]
+set disk [lindex $argv 2]
+set repo_iso [lindex $argv 3]
+set log_path [lindex $argv 4]
+set mirror [lindex $argv 5]
+
+if {$mirror eq ""} {
+  set mirror "stable"
+}
+
+if {$log_path ne ""} {
+  log_file $log_path
+}
+log_user 1
+
+spawn $qemu \
+  -enable-kvm \
+  -machine q35 \
+  -cpu host \
+  -smp 4 \
+  -m 8192 \
+  -boot order=c,menu=off \
+  -nographic \
+  -no-reboot \
+  -drive if=pflash,format=raw,readonly=on,file=$firmware \
+  -drive if=none,id=vdisk,file=$disk,format=qcow2,cache=writeback,discard=unmap \
+  -device virtio-blk-pci,drive=vdisk,serial=omarchy-zfs-root,bootindex=0 \
+  -drive if=none,id=repo,file=$repo_iso,format=raw,media=cdrom,readonly=on \
+  -device ide-cd,drive=repo,bus=ide.0 \
+  -nic user,model=virtio-net-pci
+
+expect {
+  -re {arch-zfs login:} {
+    send "berend\r"
+  }
+  timeout {
+    puts "Timed out waiting for installed VM login prompt"
+    exit 1
+  }
+}
+
+expect {
+  -re {Password:} {
+    send "omarchy\r"
+  }
+  timeout {
+    puts "Timed out waiting for password prompt"
+    exit 1
+  }
+}
+
+expect {
+  -re {\$ } {}
+  timeout {
+    puts "Timed out waiting for user shell"
+    exit 1
+  }
+}
+
+send "(set -e; sudo mkdir -p /mnt/omarchy-repo; sudo mount -o ro /dev/sr0 /mnt/omarchy-repo; rm -rf ~/.local/share/omarchy; mkdir -p ~/.local/share/omarchy; tar -xf /mnt/omarchy-repo/omarchy-repo.tar -C ~/.local/share/omarchy; cd ~/.local/share/omarchy; set +e; OMARCHY_MIRROR=$mirror OMARCHY_ONLINE_INSTALL=1 OMARCHY_CHROOT_INSTALL=1 bash install.sh; rc=\$?; set -e; printf '\\n__OMARCHY_INSTALL_EXIT:%s__\\n' \$rc; exit \$rc); rc=\$?; printf '\\n__OMARCHY_WRAPPER_EXIT:%s__\\n' \$rc\r"
+
+set timeout 14400
+expect {
+  -re {Reboot Now} {
+    send "\r"
+    exp_continue
+  }
+  -re {Omarchy installation stopped!} {
+    puts "Omarchy installer reported failure"
+    exit 1
+  }
+  -re {__OMARCHY_INSTALL_EXIT:0__} {
+    send "sudo reboot\r"
+    exp_continue
+  }
+  -re {__OMARCHY_INSTALL_EXIT:([1-9][0-9]*)__} {
+    puts "Omarchy installer exited with failure"
+    exit 1
+  }
+  timeout {
+    puts "Timed out waiting for Omarchy install completion"
+    exit 1
+  }
+  eof {}
+}

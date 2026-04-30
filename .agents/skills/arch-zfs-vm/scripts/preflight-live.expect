@@ -1,0 +1,72 @@
+#!/usr/bin/expect -f
+set timeout 1800
+
+set qemu [lindex $argv 0]
+set firmware [lindex $argv 1]
+set kernel [lindex $argv 2]
+set initrd [lindex $argv 3]
+set arch_iso [lindex $argv 4]
+set iso_label [lindex $argv 5]
+set archzfs_repo [lindex $argv 6]
+
+if {$iso_label eq ""} {
+  set iso_label "Archzfs_20260401_2220"
+}
+if {$archzfs_repo eq ""} {
+  set archzfs_repo "https://github.com/archzfs/archzfs/releases/download/experimental"
+}
+
+spawn $qemu \
+  -enable-kvm \
+  -machine q35 \
+  -cpu host \
+  -smp 2 \
+  -m 4096 \
+  -nographic \
+  -no-reboot \
+  -drive if=pflash,format=raw,readonly=on,file=$firmware \
+  -drive if=none,id=archiso,file=$arch_iso,format=raw,media=cdrom,readonly=on \
+  -device ide-cd,drive=archiso,bus=ide.0 \
+  -kernel $kernel \
+  -initrd $initrd \
+  -append "archisobasedir=arch archisolabel=$iso_label cow_spacesize=2G console=ttyS0,115200n8"
+
+expect {
+  -re {archiso login:} {
+    send "root\r"
+    exp_continue
+  }
+  -re {Password:} {
+    send "\r"
+    exp_continue
+  }
+  -re {# } {}
+  timeout {
+    puts "Timed out waiting for Arch ISO root shell"
+    exit 1
+  }
+}
+
+send "cat >> /etc/pacman.conf <<'EOF'\r"
+send "\r"
+send "\[archzfs\]\r"
+send "SigLevel = Never\r"
+send "Server = $archzfs_repo\r"
+send "EOF\r"
+send "pacman -Sy --noconfirm && pacman -Si zfs-linux-lts zfs-utils limine linux-lts; printf '\\n__PREFLIGHT_EXIT:%s__\\n' \$?\r"
+
+expect {
+  -re {__PREFLIGHT_EXIT:0__} {
+    send "poweroff\r"
+  }
+  -re {__PREFLIGHT_EXIT:([1-9][0-9]*)__} {
+    puts "Preflight failed inside the live ISO"
+    exit 1
+  }
+  timeout {
+    puts "Timed out waiting for preflight completion"
+    exit 1
+  }
+}
+
+expect eof

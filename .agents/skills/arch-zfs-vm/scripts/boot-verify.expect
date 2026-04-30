@@ -1,0 +1,85 @@
+#!/usr/bin/expect -f
+set timeout 1200
+
+set qemu [lindex $argv 0]
+set firmware [lindex $argv 1]
+set disk [lindex $argv 2]
+set user_name [lindex $argv 3]
+set user_password [lindex $argv 4]
+set hostname [lindex $argv 5]
+set serial [lindex $argv 6]
+
+if {$user_name eq ""} {
+  set user_name "arch"
+}
+if {$user_password eq ""} {
+  set user_password "arch"
+}
+if {$hostname eq ""} {
+  set hostname "arch-zfs"
+}
+if {$serial eq ""} {
+  set serial "arch-zfs-root"
+}
+
+log_user 1
+
+spawn $qemu \
+  -enable-kvm \
+  -machine q35 \
+  -cpu host \
+  -smp 4 \
+  -m 8192 \
+  -boot order=c,menu=off \
+  -nographic \
+  -no-reboot \
+  -drive if=pflash,format=raw,readonly=on,file=$firmware \
+  -drive if=none,id=vdisk,file=$disk,format=qcow2,cache=writeback,discard=unmap \
+  -device virtio-blk-pci,drive=vdisk,serial=$serial,bootindex=0 \
+  -nic user,model=virtio-net-pci
+
+expect {
+  -re "$hostname login:" {
+    send "$user_name\r"
+  }
+  timeout {
+    puts "Timed out waiting for installed VM login prompt"
+    exit 1
+  }
+}
+
+expect {
+  -re {Password:} {
+    send "$user_password\r"
+  }
+  timeout {
+    puts "Timed out waiting for password prompt"
+    exit 1
+  }
+}
+
+expect {
+  -re {\$ } {}
+  timeout {
+    puts "Timed out waiting for user shell"
+    exit 1
+  }
+}
+
+send "(set -e; printf '\\n__VERIFY_START__\\n'; pwd; test -d /home/$user_name; uname -r; findmnt -n -o FSTYPE /; sudo zpool status zroot; sudo zfs list -o name,mountpoint,canmount -r zroot; sudo test -f /boot/EFI/BOOT/BOOTX64.EFI; printf 'limine-fallback-ok\\n'; sudo test -f /boot/EFI/BOOT/limine.conf; printf 'limine-conf-ok\\n'; printf '__VERIFY_OK__\\n'); rc=\$?; printf '__VERIFY_EXIT:%s__\\n' \$rc\r"
+
+expect {
+  -re {__VERIFY_EXIT:0__} {
+    send "sudo poweroff\r"
+  }
+  -re {__VERIFY_EXIT:([1-9][0-9]*)__} {
+    puts "Installed VM verification failed"
+    exit 1
+  }
+  timeout {
+    puts "Timed out waiting for verification completion"
+    exit 1
+  }
+}
+
+expect eof
