@@ -30,6 +30,16 @@ echo 4.0.0
 STUB
 chmod +x "$fake_bin/omarchy-version"
 
+cat >"$fake_bin/findmnt" <<'STUB'
+#!/bin/bash
+if [[ $* == *FSTYPE* ]]; then
+  echo btrfs
+else
+  exec /usr/bin/findmnt "$@"
+fi
+STUB
+chmod +x "$fake_bin/findmnt"
+
 # Snapper with no configs: list-configs prints only the CSV header.
 cat >"$fake_bin/snapper" <<'STUB'
 #!/bin/bash

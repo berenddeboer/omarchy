@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /etc/default/omarchy-zfs
+user="${PAM_USER:-}"
+[[ -n $user ]] || exit 1
+zfs list -H -o name "$ZFS_HOME_DATASET_PREFIX/$user" >/dev/null 2>&1

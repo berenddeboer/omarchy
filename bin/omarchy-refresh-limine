@@ -16,4 +16,6 @@ sudo mv /boot/limine.conf /boot/limine.conf.bak
 sudo cp "$OMARCHY_PATH/default/limine/limine.conf" /boot/limine.conf
 
 sudo limine-update
-sudo limine-snapper-sync
+if [[ $(findmnt -n -o FSTYPE / 2>/dev/null || true) == "btrfs" ]]; then
+  sudo limine-snapper-sync
+fi

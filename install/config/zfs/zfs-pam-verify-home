@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /etc/default/omarchy-zfs
+user="${PAM_USER:-}"
+[[ -n $user ]] || exit 1
+home=$(getent passwd "$user" | cut -d: -f6)
+dataset="$ZFS_HOME_DATASET_PREFIX/$user"
+[[ $(findmnt -n -o SOURCE --target "$home" 2>/dev/null || true) == "$dataset" ]]

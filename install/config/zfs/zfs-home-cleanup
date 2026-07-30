@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /etc/default/omarchy-zfs
+user="${1:-}"
+[[ -n $user ]] || exit 0
+
+passwd_entry=$(getent passwd "$user" || true)
+[[ -n $passwd_entry ]] || exit 0
+IFS=: read -r _ _ uid _ _ home _ <<<"$passwd_entry"
+[[ $uid =~ ^[0-9]+$ ]] || exit 0
+((uid >= 1000)) || exit 0
+
+dataset="$ZFS_HOME_DATASET_PREFIX/$user"
+zfs list -H -o name "$dataset" >/dev/null 2>&1 || exit 0
+
+user_has_sessions() {
+  local session session_class
+  for session in $(loginctl show-user "$user" -p Sessions --value 2>/dev/null || true); do
+    session_class=$(loginctl show-session "$session" -p Class --value 2>/dev/null || true)
+    [[ $session_class == user || $session_class == user-early ]] && return 0
+  done
+  return 1
+}
+
+for _ in {1..24}; do
+  if user_has_sessions; then
+    sleep 5
+    continue
+  fi
+  if [[ $(findmnt -n -o SOURCE --target "$home" 2>/dev/null || true) == "$dataset" ]]; then
+    zfs unmount "$dataset" >/dev/null 2>&1 || { sleep 5; continue; }
+  fi
+  [[ $(zfs get -H -o value keystatus "$dataset" 2>/dev/null || true) == available ]] && zfs unload-key "$dataset" >/dev/null 2>&1 || true
+  exit 0
+done

@@ -47,9 +47,10 @@ trap - EXIT
 # Audio stack is up
 wait_until "pipewire is running" 30 wpctl status
 
-# Root filesystem is btrfs as installed
-[[ $(findmnt -no FSTYPE /) == "btrfs" ]] || fail "root filesystem is btrfs"
-pass "root filesystem is btrfs"
+# Root filesystem matches the installer scenario.
+expected_filesystem=${OMARCHY_EXPECTED_FILESYSTEM:-btrfs}
+[[ $(findmnt -no FSTYPE /) == "$expected_filesystem" ]] || fail "root filesystem is $expected_filesystem"
+pass "root filesystem is $expected_filesystem"
 
 # Omarchy reports its version
 omarchy-version >/dev/null || fail "omarchy-version works"

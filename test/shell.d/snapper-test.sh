@@ -25,6 +25,12 @@ trap 'rm -rf "$test_tmp"' EXIT
 fake_bin="$test_tmp/bin"
 mkdir -p "$fake_bin"
 
+cat >"$fake_bin/findmnt" <<'STUB'
+#!/bin/bash
+printf '%s\n' "${TEST_FSTYPE:-btrfs}"
+STUB
+chmod +x "$fake_bin/findmnt"
+
 cat >"$fake_bin/snapper" <<'STUB'
 #!/bin/bash
 printf 'snapper %s\n' "$*" >>"$TEST_LOG"

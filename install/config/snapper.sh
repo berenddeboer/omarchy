@@ -2,6 +2,12 @@ SNAPPER_CONFIG_PATH="${OMARCHY_SNAPPER_CONFIG_PATH:-/etc/snapper/configs/root}"
 SNAPPER_CONF_PATH="${OMARCHY_SNAPPER_CONF_PATH:-/etc/conf.d/snapper}"
 template="${OMARCHY_SNAPPER_TEMPLATE:-${OMARCHY_PATH:-/usr/share/omarchy}/default/snapper/root}"
 
+if [[ $(findmnt -n -o FSTYPE / 2>/dev/null || true) != "btrfs" ]]; then
+  echo "Skipping Snapper setup (requires Btrfs root filesystem)"
+  systemctl disable --now snapper-timeline.timer snapper-cleanup.timer limine-snapper-sync.service >/dev/null 2>&1 || true
+  exit 0
+fi
+
 echo "Configuring Omarchy Snapper snapshot retention"
 
 if [[ ! -f $SNAPPER_CONFIG_PATH ]]; then
