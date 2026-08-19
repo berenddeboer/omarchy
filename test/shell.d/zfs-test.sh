@@ -39,4 +39,6 @@ grep -F 'Restoring ZFS snapshots from the boot menu is not supported' "$snapshot
 grep -F 'zfs snapshot' "$snapshot" >/dev/null || fail "updates can create native ZFS snapshots"
 grep -F '== "btrfs"' "$refresh_limine" >/dev/null || fail "Limine refresh only syncs Snapper on Btrfs"
 grep -F 'archzfs_repo' "$pacman_helper" >/dev/null || fail "pacman refresh preserves ArchZFS"
+grep -F '[omarchy-zfs]' "$ROOT/default/pacman/pacman-edge.conf" >/dev/null || fail "edge pacman config includes omarchy-zfs"
+grep -F 'omarchy-zfs-pkgs/releases/download/zfs' "$ROOT/default/pacman/pacman-stable.conf" >/dev/null || fail "stable pacman config points at the ZFS package repo"
 pass "runtime commands remain filesystem-aware after installation"

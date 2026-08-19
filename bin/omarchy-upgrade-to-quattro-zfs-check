@@ -1,0 +1,367 @@
+#!/bin/bash
+
+# omarchy:summary=Check whether an Omarchy 3 ZFS install is ready for a Quattro upgrade.
+# omarchy:args=[--user USER] [--output DIR] [--recovery-dir DIR] [--require-recovery]
+# omarchy:examples=omarchy-upgrade-to-quattro-zfs-check --output /mnt/recovery/inventory
+# omarchy:requires-sudo=true
+
+set -uo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: omarchy-upgrade-to-quattro-zfs-check [options]
+
+Run read-only checks for an Omarchy 3 ZFS to Quattro migration. This command
+does not take snapshots, install packages, alter PAM, or rebuild boot files.
+
+Options:
+  --user USER          Omarchy user whose encrypted home will be migrated
+  --output DIR         Write a timestamped inventory beneath DIR
+  --recovery-dir DIR   Check a mounted recovery destination
+  --require-recovery   Fail unless recovery media has a rehearsal marker
+  -h, --help           Show this help
+
+Recovery media is considered rehearsed only when it contains the file
+.omarchy-zfs-recovery-tested. Create that marker after booting the media and
+successfully importing zroot, loading the home key, mounting the datasets, and
+confirming Limine can be repaired.
+USAGE
+}
+
+target_user="${OMARCHY_INSTALL_USER:-}"
+output_dir=""
+recovery_dir=""
+require_recovery=0
+
+while (($#)); do
+  case "$1" in
+    --user) target_user="${2:-}"; shift 2 ;;
+    --output) output_dir="${2:-}"; shift 2 ;;
+    --recovery-dir) recovery_dir="${2:-}"; shift 2 ;;
+    --require-recovery) require_recovery=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [[ -z $target_user ]]; then
+  target_user="${SUDO_USER:-${USER:-}}"
+fi
+if [[ -z $target_user || $target_user == root ]]; then
+  printf 'FAIL  A non-root Omarchy user is required; pass --user USER.\n' >&2
+  exit 2
+fi
+
+# Test fixtures can redirect file reads without changing command behavior.
+root="${OMARCHY_ZFS_CHECK_ROOT:-}"
+root=${root%/}
+at() {
+  printf '%s%s\n' "$root" "$1"
+}
+
+failures=0
+warnings=0
+passes=0
+
+pass() {
+  printf 'PASS  %s\n' "$*"
+  ((passes += 1))
+}
+
+warn() {
+  printf 'WARN  %s\n' "$*" >&2
+  ((warnings += 1))
+}
+
+fail() {
+  printf 'FAIL  %s\n' "$*" >&2
+  ((failures += 1))
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "Required command is missing: $1"
+}
+
+check_file() {
+  local file="$1" description="$2"
+  if [[ -s $(at "$file") ]]; then
+    pass "$description exists: $file"
+  else
+    fail "$description is missing or empty: $file"
+  fi
+}
+
+findmnt_value() {
+  local column="$1" mountpoint="$2"
+  findmnt -n -o "$column" --mountpoint "$mountpoint" 2>/dev/null || true
+}
+
+zfs_value() {
+  zfs get -H -o value "$1" "$2" 2>/dev/null || true
+}
+
+for command in findmnt zpool zfs pacman pacman-key modinfo sha256sum stat; do
+  require_command "$command"
+done
+
+target_home=$(getent passwd "$target_user" 2>/dev/null | cut -d: -f6)
+if [[ -z $target_home ]]; then
+  fail "User does not exist: $target_user"
+  target_home="/home/$target_user"
+else
+  pass "Target user exists: $target_user ($target_home)"
+fi
+
+root_fstype=$(findmnt_value FSTYPE /)
+root_dataset=$(findmnt_value SOURCE /)
+if [[ $root_fstype == zfs ]]; then
+  pass "Root filesystem is ZFS"
+else
+  fail "Root filesystem is '$root_fstype', expected zfs"
+fi
+if [[ $root_dataset == zroot/ROOT/default ]]; then
+  pass "Root dataset is zroot/ROOT/default"
+else
+  fail "Root dataset is '$root_dataset', expected zroot/ROOT/default"
+fi
+
+pool=${root_dataset%%/*}
+[[ $pool == zroot ]] || pool=zroot
+pool_health=$(zpool status -x "$pool" 2>/dev/null || true)
+if [[ $pool_health == "pool '$pool' is healthy" ]]; then
+  pass "Pool $pool is healthy"
+else
+  fail "Pool $pool is not healthy: ${pool_health:-no status}"
+fi
+
+bootfs=$(zpool get -H -o value bootfs "$pool" 2>/dev/null || true)
+if [[ $bootfs == zroot/ROOT/default ]]; then
+  pass "Pool bootfs is zroot/ROOT/default"
+else
+  fail "Pool bootfs is '$bootfs', expected zroot/ROOT/default"
+fi
+
+IFS=$'\t' read -r pool_capacity pool_free < <(zpool list -Hp -o capacity,free "$pool" 2>/dev/null || printf '\t')
+if [[ $pool_capacity =~ ^[0-9]+$ ]]; then
+  if ((pool_capacity < 85)); then
+    pass "Pool capacity is ${pool_capacity}%"
+  else
+    fail "Pool capacity is ${pool_capacity}%; reduce it below 85%"
+  fi
+else
+  fail "Could not determine pool capacity"
+fi
+if [[ $pool_free =~ ^[0-9]+$ ]]; then
+  if ((pool_free >= 10737418240)); then
+    pass "Pool has at least 10 GiB free"
+  else
+    fail "Pool has less than 10 GiB free"
+  fi
+else
+  fail "Could not determine pool free space"
+fi
+
+declare -A expected_mounts=(
+  [/]=zroot/ROOT/default
+  [/tmp]=zroot/data/tmp
+  [/var/tmp]=zroot/var/tmp
+  [/var/log]=zroot/var/log
+)
+for mountpoint in / /tmp /var/tmp /var/log; do
+  source=$(findmnt_value SOURCE "$mountpoint")
+  fstype=$(findmnt_value FSTYPE "$mountpoint")
+  if [[ $source == "${expected_mounts[$mountpoint]}" && $fstype == zfs ]]; then
+    pass "$mountpoint is disk-backed by $source"
+  else
+    fail "$mountpoint is '$source' ($fstype), expected ${expected_mounts[$mountpoint]} (zfs)"
+  fi
+done
+
+home_dataset="zroot/data/home/$target_user"
+home_source=$(findmnt_value SOURCE "$target_home")
+home_fstype=$(findmnt_value FSTYPE "$target_home")
+if [[ $home_source == "$home_dataset" && $home_fstype == zfs ]]; then
+  pass "$target_home is mounted from $home_dataset"
+else
+  fail "$target_home is '$home_source' ($home_fstype), expected $home_dataset (zfs)"
+fi
+
+encryption=$(zfs_value encryption "$home_dataset")
+keyformat=$(zfs_value keyformat "$home_dataset")
+keylocation=$(zfs_value keylocation "$home_dataset")
+keystatus=$(zfs_value keystatus "$home_dataset")
+if [[ $encryption != off && -n $encryption && $encryption != - ]]; then
+  pass "$home_dataset is encrypted ($encryption)"
+else
+  fail "$home_dataset is not encrypted"
+fi
+if [[ $keyformat == passphrase ]]; then
+  pass "$home_dataset uses a passphrase key"
+else
+  fail "$home_dataset keyformat is '$keyformat', expected passphrase"
+fi
+if [[ $keylocation == prompt ]]; then
+  pass "$home_dataset prompts for its key"
+else
+  fail "$home_dataset keylocation is '$keylocation', expected prompt"
+fi
+if [[ $keystatus == available ]]; then
+  pass "$home_dataset key is loaded for this session"
+else
+  fail "$home_dataset keystatus is '$keystatus', expected available"
+fi
+
+hostid_file=$(at /etc/hostid)
+if [[ -f $hostid_file && $(stat -c %s "$hostid_file" 2>/dev/null || true) == 4 ]]; then
+  pass "/etc/hostid exists and is exactly four bytes"
+else
+  fail "/etc/hostid is missing or is not exactly four bytes"
+fi
+check_file /etc/zfs/zpool.cache "ZFS pool cache"
+check_file /etc/mkinitcpio.conf "mkinitcpio configuration"
+check_file /boot/limine.conf "Limine configuration"
+
+boot_fstype=$(findmnt_value FSTYPE /boot)
+boot_options=$(findmnt_value OPTIONS /boot)
+if [[ $boot_fstype == vfat && ,$boot_options, == *,rw,* ]]; then
+  pass "/boot is a writable vfat ESP"
+else
+  fail "/boot is '$boot_fstype' with options '$boot_options', expected writable vfat"
+fi
+
+limine_conf=$(at /boot/limine.conf)
+old_uki=""
+if [[ -r $limine_conf ]]; then
+  old_uki=$(awk '/^[[:space:]]*path:[[:space:]]*boot\(\):\/EFI\/Linux\/.*\.efi/ { sub(/^[[:space:]]*path:[[:space:]]*boot\(\):/, ""); sub(/#.*/, ""); print; exit }' "$limine_conf")
+fi
+if [[ -n $old_uki && -s $(at "/boot$old_uki") ]]; then
+  pass "Working Limine entry references $old_uki"
+else
+  fail "Could not resolve an existing UKI from /boot/limine.conf"
+fi
+
+limine_defaults=$(at /etc/default/limine)
+if [[ -r $limine_defaults ]] && grep -Fq 'root=ZFS=zroot/ROOT/default' "$limine_defaults" && grep -Fq 'zfs_boot_only=1' "$limine_defaults"; then
+  pass "Limine kernel command line contains the ZFS root contract"
+else
+  fail "/etc/default/limine is missing root=ZFS=zroot/ROOT/default or zfs_boot_only=1"
+fi
+
+hooks_file=$(at /etc/mkinitcpio.conf.d/omarchy_hooks.conf)
+if [[ -r $hooks_file ]] && grep -Eq 'HOOKS=.*\bzfs\b.*\bfilesystems\b' "$hooks_file" && ! grep -Eq '\b(fsck|btrfs-overlayfs)\b' "$hooks_file"; then
+  pass "mkinitcpio hooks use zfs filesystems without Btrfs/fsck hooks"
+else
+  fail "mkinitcpio hooks are not safe for a ZFS root"
+fi
+if grep -Rqs '/etc/hostid' "$(at /etc/mkinitcpio.conf)" "$(at /etc/mkinitcpio.conf.d)" 2>/dev/null; then
+  pass "mkinitcpio includes /etc/hostid"
+else
+  fail "mkinitcpio does not include /etc/hostid"
+fi
+
+for package in zfs-utils zfs-dkms dkms; do
+  if pacman -Q "$package" >/dev/null 2>&1; then
+    pass "Package is installed: $package"
+  else
+    fail "Required package is missing: $package"
+  fi
+done
+if awk '/^[[:space:]]*\[archzfs\][[:space:]]*$/ { found=1 } END { exit !found }' "$(at /etc/pacman.conf)" 2>/dev/null; then
+  pass "The [archzfs] repository is configured"
+else
+  fail "The [archzfs] repository is not configured"
+fi
+if pacman-key --list-keys 3A9917BF0DED5C13F69AC68FABEC0A1208037BE9 >/dev/null 2>&1; then
+  pass "The ArchZFS signing key is present"
+else
+  fail "The ArchZFS signing key is missing"
+fi
+
+kernel_count=0
+for pkgbase_file in "$(at /usr/lib/modules)"/*/pkgbase; do
+  [[ -f $pkgbase_file ]] || continue
+  ((kernel_count += 1))
+  kernel_version=${pkgbase_file%/pkgbase}
+  kernel_version=${kernel_version##*/}
+  kernel_pkgbase=$(<"$pkgbase_file")
+  if pacman -Q "${kernel_pkgbase}-headers" >/dev/null 2>&1; then
+    pass "Headers are installed for $kernel_pkgbase"
+  else
+    fail "Headers are missing for $kernel_pkgbase"
+  fi
+  if modinfo -k "$kernel_version" zfs >/dev/null 2>&1; then
+    pass "ZFS module exists for kernel $kernel_version"
+  else
+    fail "ZFS module is missing for kernel $kernel_version"
+  fi
+done
+((kernel_count > 0)) || fail "No installed kernels were found under /usr/lib/modules"
+
+for path in /var/lib/docker /var/lib/libvirt; do
+  source=$(findmnt_value SOURCE "$path")
+  if [[ -n $source ]]; then
+    if [[ $source == zroot/* ]]; then
+      pass "$path is on ZFS dataset $source"
+    else
+      warn "$path is mounted from non-ZFS source $source"
+    fi
+  else
+    warn "$path is not a separate mount"
+  fi
+done
+
+if [[ -n $recovery_dir ]]; then
+  recovery_source=$(findmnt -n -o SOURCE --target "$recovery_dir" 2>/dev/null || true)
+  if [[ -n $recovery_source && $recovery_source != zroot/* ]]; then
+    pass "Recovery destination is outside zroot: $recovery_source"
+  else
+    fail "Recovery destination is not a mounted filesystem outside zroot: $recovery_dir"
+  fi
+  if [[ -f $recovery_dir/.omarchy-zfs-recovery-tested ]]; then
+    pass "Recovery rehearsal marker is present"
+  else
+    fail "Recovery rehearsal marker is missing: $recovery_dir/.omarchy-zfs-recovery-tested"
+  fi
+elif ((require_recovery)); then
+  fail "--require-recovery needs --recovery-dir DIR"
+else
+  warn "Recovery media was not checked; a real migration must pass --require-recovery"
+fi
+
+if [[ -n $output_dir ]]; then
+  run_id=$(date -u +%Y%m%dT%H%M%SZ)
+  inventory_dir="$output_dir/omarchy-zfs-upgrade-$run_id"
+  mkdir -p "$inventory_dir"
+  {
+    printf 'run_id=%s\n' "$run_id"
+    printf 'target_user=%s\n' "$target_user"
+    printf 'target_home=%s\n' "$target_home"
+    printf 'root_dataset=%s\n' "$root_dataset"
+    printf 'pool=%s\n' "$pool"
+    printf 'home_dataset=%s\n' "$home_dataset"
+    printf 'old_uki=%s\n' "$old_uki"
+    printf 'passes=%s\nfailures=%s\nwarnings=%s\n' "$passes" "$failures" "$warnings"
+  } >"$inventory_dir/summary"
+  zpool status "$pool" >"$inventory_dir/zpool-status.txt" 2>&1 || true
+  zpool get all "$pool" >"$inventory_dir/zpool-properties.txt" 2>&1 || true
+  zfs list -r -o name,mountpoint,encryption,keyformat,keylocation,keystatus "$pool" >"$inventory_dir/zfs-datasets.txt" 2>&1 || true
+  findmnt --real >"$inventory_dir/findmnt.txt" 2>&1 || true
+  pacman -Qqe >"$inventory_dir/packages-native.txt" 2>&1 || true
+  pacman -Qqm >"$inventory_dir/packages-foreign.txt" 2>&1 || true
+  pacman -Q >"$inventory_dir/packages-all.txt" 2>&1 || true
+  command -v dkms >/dev/null 2>&1 && dkms status >"$inventory_dir/dkms-status.txt" 2>&1 || true
+  command -v efibootmgr >/dev/null 2>&1 && efibootmgr -v >"$inventory_dir/efibootmgr.txt" 2>&1 || true
+  sha256sum "$hostid_file" >"$inventory_dir/hostid.sha256" 2>/dev/null || true
+  [[ -n $old_uki ]] && sha256sum "$(at "/boot$old_uki")" >"$inventory_dir/working-uki.sha256" 2>/dev/null || true
+  tar -C "${root:-/}" -cpf "$inventory_dir/configuration.tar" \
+    etc/hostid etc/mkinitcpio.conf etc/mkinitcpio.conf.d etc/default/limine \
+    etc/pam.d etc/pacman.conf etc/pacman.d etc/zfs boot/limine.conf 2>"$inventory_dir/tar-errors.txt" || true
+  printf 'Inventory written to %s\n' "$inventory_dir"
+fi
+
+printf '\nSummary: %d passed, %d failed, %d warnings\n' "$passes" "$failures" "$warnings"
+if ((failures)); then
+  printf 'This machine is not ready for the ZFS migration. No system changes were made.\n' >&2
+  exit 1
+fi
+printf 'Preflight passed. This is not authorization to migrate before the VM upgrade suite passes.\n'

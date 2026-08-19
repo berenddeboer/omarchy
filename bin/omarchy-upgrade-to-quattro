@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # omarchy:summary=Upgrade a legacy Omarchy install to the package-backed Omarchy quattro layout.
-# omarchy:args=[--yes] [--reboot] [--dev] [--channel stable|rc|edge] [--user USER]
+# omarchy:args=[--yes] [--reboot|--no-reboot] [--dev] [--channel stable|rc|edge] [--user USER] [--local-packages DIR]
 # omarchy:examples=omarchy upgrade to quattro | omarchy upgrade to quattro --dev
 # omarchy:requires-sudo=true
 
@@ -9,7 +9,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: omarchy-upgrade-to-quattro [--yes] [--reboot] [--dev] [--channel stable|rc|edge] [--user USER]
+Usage: omarchy-upgrade-to-quattro [--yes] [--reboot|--no-reboot] [--dev] [--channel stable|rc|edge] [--user USER] [--local-packages DIR]
 
 Upgrade any pre-quattro Omarchy install to the package-backed Omarchy quattro layout.
 This script is intentionally self-contained so it can be shipped as a command
@@ -18,9 +18,11 @@ in Omarchy 3.8.x or run directly with curl | bash on older systems.
 Options:
   -y, --yes                 Do not prompt before upgrading
   --reboot                  Reboot automatically after a successful upgrade
+  --no-reboot               Do not prompt or reboot after a successful upgrade
   --dev                     Use dev packages [omarchy-dev / omarchy-settings-dev] (uses edge channel)
   --channel stable|rc|edge  Override the default stable Omarchy package channel
   --user USER               User account to refresh after package install
+  --local-packages DIR      Install locally built Omarchy packages from DIR
   -h, --help                Show this help
 USAGE
 }
@@ -74,6 +76,8 @@ target_user="${OMARCHY_INSTALL_USER:-}"
 yes=0
 auto_reboot=0
 boot_cmdline_unsafe=0
+no_reboot=0
+local_packages_dir="${OMARCHY_UPGRADE_LOCAL_PACKAGES:-}"
 use_dev_packages=${OMARCHY_UPGRADE_DEV:-0}
 
 while (($#)); do
@@ -84,6 +88,10 @@ while (($#)); do
       ;;
     --reboot)
       auto_reboot=1
+      shift
+      ;;
+    --no-reboot)
+      no_reboot=1
       shift
       ;;
     --dev)
@@ -97,6 +105,10 @@ while (($#)); do
       ;;
     --user)
       target_user="${2:-}"
+      shift 2
+      ;;
+    --local-packages)
+      local_packages_dir="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -176,6 +188,17 @@ target_home=$(getent passwd "$target_user" | cut -d: -f6)
 target_uid=$(id -u "$target_user")
 target_runtime_dir="/run/user/$target_uid"
 package_path="/usr/share/omarchy/bin:/usr/local/bin:/usr/bin:/bin:$target_home/.local/bin"
+root_fstype=$(findmnt -n -o FSTYPE / 2>/dev/null || true)
+is_zfs=0
+[[ $root_fstype == zfs ]] && is_zfs=1
+
+if ((auto_reboot && no_reboot)); then
+  fail "--reboot and --no-reboot cannot be used together."
+fi
+if [[ -n $local_packages_dir ]]; then
+  [[ -d $local_packages_dir ]] || fail "Local package directory was not found: $local_packages_dir"
+  local_packages_dir=$(realpath "$local_packages_dir")
+fi
 
 as_root() {
   if (( EUID == 0 )); then
@@ -366,6 +389,10 @@ cleanup_on_exit() {
     kill "$sudo_keepalive_pid" 2>/dev/null || true
   fi
 
+  if (( ${boot_hook_deferred:-0} )); then
+    as_root rm -f /etc/pacman.d/hooks/90-mkinitcpio-install.hook >/dev/null 2>&1 || true
+  fi
+
   # set -e aborts without a word, and the last thing on screen is a green
   # progress line, so a half-finished upgrade otherwise reads as a finished one.
   if (( exit_status != 0 && upgrade_started && ! upgrade_completed )); then
@@ -385,6 +412,20 @@ if (( EUID != 0 )); then
 fi
 
 backup_suffix=$(date +%Y%m%d%H%M%S)
+boot_hook_deferred=0
+
+defer_boot_hook() {
+  ((is_zfs)) || return 0
+  as_root install -d -m 0755 /etc/pacman.d/hooks
+  as_root ln -sfn /dev/null /etc/pacman.d/hooks/90-mkinitcpio-install.hook
+  boot_hook_deferred=1
+}
+
+restore_boot_hook() {
+  ((boot_hook_deferred)) || return 0
+  as_root rm -f /etc/pacman.d/hooks/90-mkinitcpio-install.hook
+  boot_hook_deferred=0
+}
 
 configure_pacman_channel() {
   log "Configuring Omarchy pacman repositories ($channel)"
@@ -403,26 +444,45 @@ configure_pacman_channel() {
 
   # Replace the normal Omarchy package repository. Dev package mode uses the
   # edge channel and resolves omarchy-dev / omarchy-settings-dev from [omarchy].
-  local tmp
+  # On ZFS, [omarchy-zfs] must sit above [omarchy] so the private packages win.
+  local tmp zfs_server
+  zfs_server='https://github.com/berenddeboer/omarchy-zfs-pkgs/releases/download/zfs'
 
   tmp=$(mktemp)
-  awk -v server="$package_server" '
-    BEGIN { in_omarchy = 0; wrote = 0 }
+  awk -v server="$package_server" -v zfs_server="$zfs_server" -v is_zfs="$is_zfs" '
+    BEGIN { in_omarchy = 0; in_omarchy_zfs = 0; wrote = 0 }
+    /^[[:space:]]*\[omarchy-zfs\][[:space:]]*$/ {
+      in_omarchy_zfs = 1
+      next
+    }
     /^[[:space:]]*\[omarchy\][[:space:]]*$/ {
       if (!wrote) {
+        if (is_zfs == 1) {
+          print "[omarchy-zfs]"
+          print "SigLevel = Optional TrustAll"
+          print "Server = " zfs_server
+          print ""
+        }
         print "[omarchy]"
         print "SigLevel = Optional TrustAll"
         print "Server = " server
         wrote = 1
       }
       in_omarchy = 1
+      in_omarchy_zfs = 0
       next
     }
-    /^[[:space:]]*\[/ { in_omarchy = 0 }
-    !in_omarchy { print }
+    /^[[:space:]]*\[/ { in_omarchy = 0; in_omarchy_zfs = 0 }
+    !in_omarchy && !in_omarchy_zfs { print }
     END {
       if (!wrote) {
         print ""
+        if (is_zfs == 1) {
+          print "[omarchy-zfs]"
+          print "SigLevel = Optional TrustAll"
+          print "Server = " zfs_server
+          print ""
+        }
         print "[omarchy]"
         print "SigLevel = Optional TrustAll"
         print "Server = " server
@@ -512,7 +572,7 @@ normalize_limine_config() {
   # stable omarchy_linux.efi path generated by limine-entry-tool.
   machine_id=$(as_root cat /etc/machine-id 2>/dev/null || true)
   legacy_uki="/boot/EFI/Linux/${machine_id}_linux.efi"
-  if [[ -n $machine_id ]] && as_root test -f /boot/EFI/Linux/omarchy_linux.efi && as_root test -f "$legacy_uki"; then
+  if ((!is_zfs)) && [[ -n $machine_id ]] && as_root test -f /boot/EFI/Linux/omarchy_linux.efi && as_root test -f "$legacy_uki"; then
     as_root rm -f "$legacy_uki"
   fi
 }
@@ -666,11 +726,31 @@ configure_lock_authentication() {
 }
 
 create_pre_upgrade_snapshot() {
-  # 127 means Snapper is deliberately absent. Any other failure already said
-  # what went wrong, and a missing snapshot is not worth blocking the upgrade
-  # over, but it must not pass for one either.
-  omarchy-snapshot create || (($? == 127)) ||
-    echo -e "\e[33mContinuing the upgrade without a snapshot.\e[0m" >&2
+  if ((is_zfs)); then
+    local snapshot="omarchy-quattro-upgrade-$backup_suffix"
+    local root_dataset home_dataset
+    root_dataset=$(findmnt -n -o SOURCE /)
+    home_dataset=$(findmnt -n -o SOURCE "$target_home")
+    [[ $root_dataset == zroot/ROOT/default ]] || fail "Unexpected ZFS root dataset: $root_dataset"
+    [[ $home_dataset == "zroot/data/home/$target_user" ]] || fail "Unexpected ZFS home dataset: $home_dataset"
+    as_root zfs snapshot "$root_dataset@$snapshot" "$home_dataset@$snapshot"
+    as_root zfs list -H -t snapshot "$root_dataset@$snapshot" >/dev/null
+    as_root zfs list -H -t snapshot "$home_dataset@$snapshot" >/dev/null
+  else
+    # 127 means Snapper is deliberately absent. Any other failure already said
+    # what went wrong, and a missing snapshot is not worth blocking the upgrade
+    # over, but it must not pass for one either.
+    omarchy-snapshot create || (($? == 127)) ||
+      echo -e "\e[33mContinuing the upgrade without a snapshot.\e[0m" >&2
+  fi
+}
+
+configure_zfs_system() {
+  ((is_zfs)) || return 0
+  local zfs_setup=/usr/share/omarchy/install/config/zfs.sh
+  [[ -f $zfs_setup ]] || fail "$zfs_setup is unavailable."
+  log "Configuring the Quattro ZFS boot and login stack"
+  as_root env OMARCHY_PATH=/usr/share/omarchy OMARCHY_INSTALL=/usr/share/omarchy/install bash -euo pipefail "$zfs_setup"
 }
 
 remove_conflicting_legacy_packages() {
@@ -722,15 +802,18 @@ install_omarchy_quattro_packages() {
     settings_package=omarchy-settings-dev
   fi
 
-  local core_packages=(
-    omarchy-keyring
-    "$settings_package"
-    omarchy-nvim
-    "$omarchy_package"
-    fakeroot
-    pacman-contrib
-  )
+  local core_packages=(omarchy-keyring fakeroot pacman-contrib)
+  if [[ -z $local_packages_dir ]]; then
+    core_packages+=("$settings_package" omarchy-nvim "$omarchy_package")
+  fi
   local base_packages=()
+
+  if [[ -n $local_packages_dir ]]; then
+    local local_packages=("$local_packages_dir"/omarchy-settings-dev-*.pkg.tar.zst "$local_packages_dir"/omarchy-dev-*.pkg.tar.zst "$local_packages_dir"/omarchy-nvim-*.pkg.tar.zst)
+    [[ -f ${local_packages[0]} && -f ${local_packages[1]} ]] || fail "Local Omarchy packages are incomplete in $local_packages_dir"
+    log "Installing locally built Omarchy packages"
+    as_root pacman -U --needed --noconfirm --ask 4 --overwrite='*' "${local_packages[@]}"
+  fi
 
   log "Upgrading system packages and installing Omarchy quattro packages"
   (( use_dev_packages )) && log "Using dev packages [omarchy-dev / omarchy-settings-dev]"
@@ -1208,7 +1291,12 @@ run_post_upgrade_migrations() {
 
 run_final_system_package_upgrade() {
   log "Checking for remaining system package updates"
+  local -a ignore_args=()
+  if ((is_zfs)); then
+    ignore_args=(--ignore omarchy,omarchy-dev,omarchy-settings,omarchy-settings-dev)
+  fi
   as_root env OMARCHY_UPDATE_PACMAN=1 pacman -Syu --noconfirm --ask 4 \
+    "${ignore_args[@]}" \
     --overwrite '/etc/docker/daemon.json' \
     --overwrite '/etc/gnupg/dirmngr.conf' \
     --overwrite '/etc/mkinitcpio.conf.d/omarchy_hooks.conf' \
@@ -1307,6 +1395,7 @@ root_filesystem_encrypted() {
 }
 
 should_enable_sddm_autologin() {
+  ((is_zfs)) && return 1
   as_root test -f /etc/sddm.conf.d/autologin.conf && return 0
   as_root systemctl is-enabled omarchy-seamless-login.service >/dev/null 2>&1 && return 0
   root_filesystem_encrypted
@@ -2351,6 +2440,7 @@ upgrade_started=1
 # popups in the running session.
 suppress_hyprland_config_reload
 create_pre_upgrade_snapshot
+defer_boot_hook
 configure_pacman_channel
 install_keyrings
 remove_legacy_installer_package
@@ -2358,6 +2448,7 @@ remove_legacy_limine_configs
 remove_conflicting_legacy_packages
 install_omarchy_quattro_packages
 install_hardware_transition_packages
+configure_zfs_system
 normalize_limine_config
 preserve_kernel_cmdline_root
 configure_snapper_policy
@@ -2376,6 +2467,7 @@ ensure_sleep_lock_service
 remove_retired_default_packages
 run_final_system_package_upgrade
 run_post_upgrade_migrations
+configure_zfs_system
 run_post_upgrade_update_steps
 refresh_current_theme_after_upgrade
 # Do not force-reload Hyprland in the live upgraded session. The legacy
@@ -2383,7 +2475,7 @@ refresh_current_theme_after_upgrade
 # pre-reboot session can keep running safely; the reboot performs the real
 # Omarchy quattro Lua-config cutover.
 restore_hyprland_config_reload
-
+restore_boot_hook
 upgrade_completed=1
 
 cat <<EOF
@@ -2394,6 +2486,8 @@ EOF
 
 if (( boot_cmdline_unsafe )); then
   warn "Skipping reboot: root= could not be confirmed in the boot entries. Repair the kernel cmdline (see the warnings above) before rebooting, or the system will drop to an emergency shell."
+elif (( no_reboot )); then
+  echo "Not rebooting because --no-reboot was passed."
 elif (( auto_reboot )); then
   log "Rebooting because --reboot was passed"
   as_root systemctl reboot
