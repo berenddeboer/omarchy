@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# omarchy:summary=Create or restore system snapshots with snapper
+# omarchy:summary=Create or restore system snapshots
 # omarchy:args=<create|restore>
 # omarchy:requires-sudo=true
 
@@ -13,37 +13,62 @@ if [[ -z $COMMAND ]]; then
   exit 1
 fi
 
-if omarchy-cmd-missing snapper; then
-  exit 127 # omarchy-update can use this to just ignore if snapper is not available
-fi
-
 case "$COMMAND" in
 create)
   # The description is just a label, so never let it abort the snapshot.
   DESC="$(omarchy-version 2>/dev/null || echo unknown)"
 
-  # Get existing snapper config names from CSV output
-  mapfile -t CONFIGS < <(sudo snapper --csvout list-configs | awk -F, 'NR>1 {print $1}')
+  if [[ $(findmnt -n -o FSTYPE / 2>/dev/null || true) == "zfs" ]]; then
+    omarchy-cmd-missing zfs && exit 127
+    version=${DESC//[^A-Za-z0-9_.:-]/-}
+    snapshot="omarchy-$version-$(date +%Y%m%d%H%M%S)"
+    datasets=("$(findmnt -n -o SOURCE /)")
+    if [[ $(findmnt -n -o FSTYPE "$HOME" 2>/dev/null || true) == "zfs" ]]; then
+      home_dataset=$(findmnt -n -o SOURCE "$HOME")
+      [[ $home_dataset == "${datasets[0]}" ]] || datasets+=("$home_dataset")
+    fi
 
-  # Snapper installed but unconfigured snapshots nothing. Staying quiet here
-  # reads as a successful snapshot, so the next update looks recoverable when
-  # nothing has ever been captured.
-  if (( ${#CONFIGS[@]} == 0 )); then
-    echo -e "\e[33mNo Snapper configs found, so no snapshot was created.\e[0m" >&2
-    echo "Configure Snapper with: sudo bash -euo pipefail \"$OMARCHY_PATH/install/config/snapper.sh\"" >&2
-    exit 1
+    echo -e "\e[32mCreate system snapshot\e[0m"
+    snapshot_targets=()
+    for dataset in "${datasets[@]}"; do
+      snapshot_targets+=("$dataset@$snapshot")
+    done
+    sudo zfs snapshot "${snapshot_targets[@]}"
+
+    for dataset in "${datasets[@]}"; do
+      mapfile -t snapshots < <(sudo zfs list -H -t snapshot -o name -s creation -d 1 "$dataset" 2>/dev/null | grep -F "$dataset@omarchy-" || true)
+      while ((${#snapshots[@]} > 5)); do
+        sudo zfs destroy "${snapshots[0]}"
+        snapshots=("${snapshots[@]:1}")
+      done
+    done
+  else
+    omarchy-cmd-missing snapper && exit 127
+    mapfile -t CONFIGS < <(sudo snapper --csvout list-configs | awk -F, 'NR>1 {print $1}')
+
+    # Snapper installed but unconfigured snapshots nothing. Staying quiet here
+    # reads as a successful snapshot, so the next update looks recoverable when
+    # nothing has ever been captured.
+    if (( ${#CONFIGS[@]} == 0 )); then
+      echo -e "\e[33mNo Snapper configs found, so no snapshot was created.\e[0m" >&2
+      echo "Configure Snapper with: sudo bash -euo pipefail \"$OMARCHY_PATH/install/config/snapper.sh\"" >&2
+      exit 1
+    fi
+
+    echo -e "\e[32mCreate system snapshot\e[0m"
+    for config in "${CONFIGS[@]}"; do
+      sudo snapper -c "$config" create -c number -d "$DESC"
+      sudo snapper -c "$config" cleanup number
+    done
+    echo "Snapshots can be selected during boot."
   fi
-
-  echo -e "\e[32mCreate system snapshot\e[0m"
-
-  for config in "${CONFIGS[@]}"; do
-    sudo snapper -c "$config" create -c number -d "$DESC"
-    sudo snapper -c "$config" cleanup number
-  done
-
-  echo "Snapshots can be selected during boot."
   ;;
 restore)
+  if [[ $(findmnt -n -o FSTYPE / 2>/dev/null || true) == "zfs" ]]; then
+    echo "Restoring ZFS snapshots from the boot menu is not supported" >&2
+    exit 2
+  fi
+  omarchy-cmd-missing snapper && exit 127
   sudo limine-snapper-restore
   ;;
 esac

@@ -60,7 +60,7 @@ for platform in $platforms; do
       fail "$platform has a $channel template and mirrorlist"
     list=$(repos "$templates" "$channel") || fail "$platform $channel: pacman reads the template"
     case $platform in
-      x86) expected="omarchy core extra multilib " ;;
+      x86) expected="omarchy-zfs omarchy core extra multilib " ;;
       aarch64) expected="omarchy core extra alarm aur " ;;
       aarch64-apple) expected="omarchy asahi-alarm core extra alarm aur " ;;
     esac
@@ -78,6 +78,7 @@ pass "x86 has templates for stable, rc and edge and aarch64 for edge alone, each
 finalize_bin=$work/finalize-bin
 mkdir -p "$finalize_bin"
 printf '#!/bin/bash\necho "$PLATFORM"\n' >"$finalize_bin/omarchy-hw-platform"
+printf '#!/bin/bash\necho btrfs\n' >"$finalize_bin/findmnt"
 for command in omarchy-pkg-add pacman-key; do
   printf '#!/bin/bash\nexit 0\n' >"$finalize_bin/$command"
 done

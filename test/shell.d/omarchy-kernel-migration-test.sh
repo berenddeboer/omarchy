@@ -22,6 +22,11 @@ boot_order='BOOT_ORDER="linux-omarchy, linux-omarchy-*, *, *fallback, Snapshots"
 cat > "$scratch/bin/pacman" <<'SH'
 #!/bin/bash
 case "$1" in
+  -Qql)
+    if [[ ${META_PACKAGE:-0} != "1" ]]; then
+      printf '/usr/lib/modules/test/vmlinuz\n'
+    fi
+    ;;
   -Q) [[ $2 == -- ]] || exit 99; grep -Fxq -- "$3" "$INSTALLED_PACKAGES" ;;
   -S)
     printf 'pacman %s\n' "$*" >> "$CALL_LOG"
@@ -29,6 +34,9 @@ case "$1" in
     for arg in "$@"; do
       [[ $arg == -* ]] || printf '%s\n' "$arg" >> "$INSTALLED_PACKAGES"
     done
+    if [[ ${META_PACKAGE:-0} == "1" ]]; then
+      printf '%s\n' linux-omarchy-bore linux-omarchy-bore-headers >> "$INSTALLED_PACKAGES"
+    fi
     ;;
   *) exit 99 ;;
 esac
@@ -51,7 +59,10 @@ SH
 cat > "$scratch/bin/limine-entry-tool" <<'SH'
 #!/bin/bash
 [[ $* == "--tree" ]] || exit 99
-printf '%s\n' 'Omarchy' '  linux-ptl' '  linux-omarchy-ptl-novrr-mm' '  linux-omarchy-bore' '  linux-omarchy-fallback' '  Snapshots'
+printf '%s\n' 'Omarchy' '  linux-ptl' '  linux-omarchy-ptl-novrr-mm' '  linux-omarchy-fallback' '  Snapshots'
+if [[ ${MISSING_BORE_ENTRY:-0} == "0" ]]; then
+  printf '%s\n' '  linux-omarchy-bore'
+fi
 if [[ ${MISSING_ENTRY:-0} == "0" ]]; then
   printf '%s\n' '  linux-omarchy'
 fi
@@ -214,6 +225,21 @@ fi
 run_migration
 [[ -f $OMARCHY_KERNEL_REBUILD_MARKER ]] || fail "a missing boot entry can be repaired on retry"
 pass "older Omarchy variants and fallback entries cannot satisfy generic kernel verification"
+
+reset_fixture
+META_PACKAGE=1 MISSING_ENTRY=1 run_migration
+grep -Fxq 'sudo limine-mkinitcpio linux-omarchy-bore' "$CALL_LOG" || fail "the meta-package rebuilds its concrete kernel"
+[[ -f $OMARCHY_KERNEL_REBUILD_MARKER ]] || fail "the concrete BORE entry completes the meta-package migration"
+grep -Fxq linux-ptl "$INSTALLED_PACKAGES" || fail "the recovery kernel remains installed"
+pass "the linux-omarchy meta-package accepts its concrete BORE boot entry"
+
+reset_fixture
+if META_PACKAGE=1 MISSING_BORE_ENTRY=1 run_migration; then
+  fail "a meta-package without its concrete boot entry must fail"
+fi
+[[ ! -e $OMARCHY_KERNEL_REBUILD_MARKER ]] || fail "a missing BORE entry stays pending"
+! grep -q '^state ' "$CALL_LOG" || fail "a missing BORE entry must not request a reboot"
+pass "a stale generic entry cannot satisfy BORE meta-package verification"
 
 reset_fixture
 cat >> "$OMARCHY_KERNEL_LIMINE_CONF" <<'CONF'

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+user="${PAM_USER:-}"
+[[ ${PAM_TYPE:-} == close_session && -n $user ]] || exit 0
+uid=$(id -u "$user" 2>/dev/null || true)
+[[ $uid =~ ^[0-9]+$ ]] || exit 0
+((uid >= 1000)) || exit 0
+
+unit="omarchy-zfs-home-cleanup-$uid-$$"
+cleanup_helper=/usr/share/omarchy/install/config/zfs/zfs-home-cleanup
+if command -v systemd-run >/dev/null 2>&1 && systemd-run --quiet --collect --unit="$unit" --on-active=5s "$cleanup_helper" "$user" >/dev/null 2>&1; then
+  exit 0
+fi
+
+( sleep 5; "$cleanup_helper" "$user" ) >/dev/null 2>&1 &

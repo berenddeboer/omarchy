@@ -33,3 +33,22 @@ omarchy_pacman_default_channel() {
       ;;
   esac
 }
+
+# Capture ArchZFS before replacing pacman.conf during setup or channel changes.
+omarchy_pacman_archzfs_repo() {
+  local config="${1:-/etc/pacman.conf}"
+  local archzfs_repo=""
+
+  if [[ -f $config ]]; then
+    archzfs_repo=$(awk '
+      /^\[/ { in_archzfs = ($0 == "[archzfs]") }
+      in_archzfs { print }
+    ' "$config")
+  fi
+
+  if [[ -z $archzfs_repo && $(findmnt -n -o FSTYPE / 2>/dev/null || true) == "zfs" ]]; then
+    archzfs_repo=$'[archzfs]\nSigLevel = PackageRequired DatabaseNever\nServer = https://github.com/archzfs/archzfs/releases/download/experimental'
+  fi
+
+  printf '%s' "$archzfs_repo"
+}
