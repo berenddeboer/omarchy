@@ -21,8 +21,12 @@ fi
 # rc on aarch64) gets the platform's default channel instead.
 channel=${OMARCHY_MIRROR:-}
 [[ -n $channel && -f $templates/pacman-$channel.conf ]] || channel=$(omarchy_pacman_default_channel "$platform")
+archzfs_repo=$(omarchy_pacman_archzfs_repo /etc/pacman.conf)
 cp -f "$templates/pacman-$channel.conf" /etc/pacman.conf
 cp -f "$templates/mirrorlist-$channel" /etc/pacman.d/mirrorlist
+if [[ -n $archzfs_repo ]] && ! grep -q '^\[archzfs\]$' /etc/pacman.conf; then
+  printf '\n%s\n' "$archzfs_repo" >>/etc/pacman.conf
+fi
 
 # An image build leaves the keyring to each machine's first boot, so no two
 # share a master key (install/helpers/image-target.sh).

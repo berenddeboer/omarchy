@@ -13,9 +13,10 @@ awk '
     if (section != "options") repositories = 1
   }
   !repositories { prefix = prefix $0 "\n"; next }
+  section == "omarchy-zfs" { zfs = zfs $0 "\n"; next }
   section == "omarchy" { omarchy = omarchy $0 "\n"; next }
   { others = others $0 "\n" }
-  END { printf "%s%s%s", prefix, omarchy, others }
+  END { printf "%s%s%s%s", prefix, zfs, omarchy, others }
 ' /etc/pacman.conf >"$pacman_config"
 
 if ! cmp -s /etc/pacman.conf "$pacman_config"; then

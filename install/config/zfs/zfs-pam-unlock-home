@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /etc/default/omarchy-zfs
+user="${PAM_USER:-}"
+[[ -n $user ]] || exit 0
+
+passwd_entry=$(getent passwd "$user" || true)
+[[ -n $passwd_entry ]] || exit 0
+IFS=: read -r _ _ uid _ _ home _ <<<"$passwd_entry"
+[[ $uid =~ ^[0-9]+$ ]] || exit 0
+((uid >= 1000)) || exit 0
+
+dataset="$ZFS_HOME_DATASET_PREFIX/$user"
+zfs list -H -o name "$dataset" >/dev/null 2>&1 || exit 0
+
+if [[ $(zfs get -H -o value keystatus "$dataset") != "available" ]]; then
+  zfs load-key "$dataset"
+fi
+
+if ! zfs mount "$dataset" >/dev/null 2>&1; then
+  [[ $(findmnt -n -o SOURCE --target "$home" 2>/dev/null || true) == "$dataset" ]]
+fi

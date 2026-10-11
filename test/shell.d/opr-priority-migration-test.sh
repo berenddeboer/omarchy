@@ -74,3 +74,17 @@ if run CONFIG_STATUS=1; then
 fi
 [[ ! -e $CALL_LOG ]] || fail "packages are not updated after a failed configuration write"
 pass "configuration failure prevents the package update"
+
+cat >>"$PACMAN_CONFIG" <<'CONF'
+[omarchy-zfs]
+SigLevel = Optional TrustAll
+Server = https://github.com/berenddeboer/omarchy-zfs-pkgs/releases/download/zfs
+CONF
+run || fail "ZFS fork repository ordering succeeds"
+order=$(awk '/^\[/ && $0 != "[options]" { print }' "$CALL_LOG")
+[[ $order == $'[omarchy-zfs]\n[omarchy]\n'* ]] || fail "ZFS packages retain priority over Omarchy and Arch"
+grep -qxF 'Server = https://github.com/berenddeboer/omarchy-zfs-pkgs/releases/download/zfs' "$CALL_LOG" || fail "ZFS repository URL survives"
+cp "$PACMAN_CONFIG" "$test_dir/zfs-ordered"
+run || fail "ZFS priority migration is repeatable"
+cmp -s "$PACMAN_CONFIG" "$test_dir/zfs-ordered" || fail "ZFS ordering is idempotent"
+pass "ZFS fork stays ahead of Omarchy and Arch repositories"

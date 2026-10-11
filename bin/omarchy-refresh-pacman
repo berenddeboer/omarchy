@@ -45,8 +45,12 @@ fi
 sudo cp -f /etc/pacman.conf /etc/pacman.conf.bak
 sudo cp -f /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.bak
 echo "Setting channel to $channel"
+archzfs_repo=$(omarchy_pacman_archzfs_repo)
 sudo cp -f "$templates/pacman-$channel.conf" /etc/pacman.conf
 sudo cp -f "$templates/mirrorlist-$channel" /etc/pacman.d/mirrorlist
+if [[ -n $archzfs_repo ]] && ! grep -q '^\[archzfs\]$' /etc/pacman.conf; then
+  printf '\n%s\n' "$archzfs_repo" | sudo tee -a /etc/pacman.conf >/dev/null
+fi
 
 # Allow user customization of /etc/pacman.conf before the upgrade runs, so
 # custom repositories and IgnorePkg entries shape the downgrade-capable

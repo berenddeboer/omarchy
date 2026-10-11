@@ -18,6 +18,14 @@ kernel="linux-omarchy"
 [[ ! -e $rebuild_marker ]] || exit 0
 omarchy-pkg-add "$kernel" "$kernel-headers"
 
+# Newer repositories ship linux-omarchy as a meta-package for the BORE
+# kernel. Rebuild and verify the package that actually owns the boot image;
+# the meta-package itself never appears in Limine's menu.
+kernel_files=$(pacman -Qql "$kernel")
+if ! grep -q '/vmlinuz$' <<< "$kernel_files" && omarchy-pkg-present linux-omarchy-bore; then
+  kernel="linux-omarchy-bore"
+fi
+
 # /etc/default/limine has priority over every drop-in, including old Dell
 # settings and customized package files whose updates landed in a .pacnew.
 # Set the exact kernel first: linux-omarchy-* only matches its older variants.
