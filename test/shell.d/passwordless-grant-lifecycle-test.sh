@@ -110,29 +110,37 @@ if ! find_omarchy_pkgs; then
 fi
 pkgs_path=$OMARCHY_PKGS_ROOT
 # The scriptlet half of this contract is omacom/omarchy-pkgs#944, still open.
-# Skip only while the checkout is in the state before it: neither settings
+# Skip only while the checkout is in the state before it: no shipped settings
 # package defines pre_remove nor mentions the passwordless-sudo helper. Once
-# either does, both are held to the full contract below, so a scriptlet that
-# loses its pre_remove fails rather than skips.
+# every shipped package does, they are all held to the full contract below, so
+# a scriptlet that loses its pre_remove fails rather than skips.
 # Remove this gate once omacom/omarchy-pkgs#944 lands.
-pre_944=true
+pre_944=false
+shipped=()
 for name in omarchy-settings omarchy-settings-dev; do
   script="$pkgs_path/$name/$name.install"
+  # This fork publishes only the -dev packages, so a variant the checkout does
+  # not ship at all is not a failure and is not held to the contract.
+  [[ -d $pkgs_path/$name ]] || continue
   [[ -f $script && -r $script ]] || fail "the omarchy-pkgs checkout at $pkgs_path ships a readable $name.install"
-  if grep -Eq '^[[:space:]]*(function[[:space:]]+pre_remove\b|pre_remove[[:space:]]*\(\))|omarchy-sudo-passwordless' "$script"; then
-    pre_944=false
-  fi
+  shipped+=("$name")
+  # The upstream release package still predates the scriptlet while the -dev
+  # one has it, so the gate opens only when every shipped package has it.
+  grep -Eq '^[[:space:]]*(function[[:space:]]+pre_remove\b|pre_remove[[:space:]]*\(\))|omarchy-sudo-passwordless' "$script" || pre_944=true
 done
-if [[ $pre_944 == "true" ]]; then
+if (( ${#shipped[@]} == 0 )) || [[ $pre_944 == "true" ]]; then
   skip "package scriptlets: the omarchy-pkgs checkout predates the settings packages' sudo cleanup (omacom/omarchy-pkgs#944)"
   exit 0
 fi
-for name in omarchy-settings omarchy-settings-dev; do
+for name in "${shipped[@]}"; do
   script="$pkgs_path/$name/$name.install"
   [[ -f $script ]] || fail "the omarchy-pkgs checkout at $pkgs_path ships $name.install"
   sed -e "s|/etc/|$test_tmp/etc/|g" -e "s|/run|$test_tmp/run|g" \
     -e "s|/usr/bin/stat|$test_tmp/bin/stat|g" -e "s|/usr/bin/rm|$test_tmp/bin/rm|g" \
     "$script" >"$test_tmp/$name.install"
+  # The removal below runs a shipped package's scriptlet, whichever variant
+  # this checkout carries.
+  [[ -n ${primary_install:-} ]] || primary_install="$test_tmp/$name.install"
   reset_grant
   (
     source "$library"
@@ -219,7 +227,7 @@ for (( attempt=0; attempt<200; attempt++ )); do
   sleep 0.01
 done
 [[ -f $test_tmp/entered ]] || fail "publisher failed to acquire the lock"
-/usr/bin/bash -euo pipefail -c 'source "$1"; pre_remove; post_remove' bash "$test_tmp/omarchy-settings.install" >"$test_tmp/removal.log" 2>&1 &
+/usr/bin/bash -euo pipefail -c 'source "$1"; pre_remove; post_remove' bash "$primary_install" >"$test_tmp/removal.log" 2>&1 &
 removal=$!
 children+=("$removal")
 # The removal announces itself before waiting for the lock, so a publisher
