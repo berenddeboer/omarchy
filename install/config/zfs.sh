@@ -30,6 +30,8 @@ fi
 EOF
 printf '%s\n' 'FILES+=(/etc/hostid)' >/etc/mkinitcpio.conf.d/zfs_hostid.conf
 
+# omarchy:heredoc-expands paths=none -- $home_prefix is the dataset path under the
+# root pool, and only root can create a pool or name it
 cat >/etc/default/omarchy-zfs <<EOF
 ZFS_HOME_DATASET_PREFIX=$home_prefix
 EOF
@@ -41,6 +43,9 @@ for helper in zfs-pam-unlock-home zfs-home-cleanup zfs-pam-cleanup-home zfs-pam-
   }
 done
 
+# omarchy:heredoc-expands paths=zfs_helper_dir -- zfs_helper_dir is the fixed
+# absolute path under /usr/share/omarchy this file assigns above, and
+# $home_prefix is the root pool's dataset path, which only root can create
 cat >/etc/pam.d/zfs-key <<EOF
 #%PAM-1.0
 auth       [success=ignore default=4] pam_succeed_if.so service in sddm:login:sshd:su-l quiet
