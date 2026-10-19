@@ -21,7 +21,10 @@ if [[ ! -f $limine_conf ]]; then
   # The ESP is often mounted umask=0077, so an unreadable menu is not a
   # missing one; and a denied prompt must leave this migration pending,
   # not done, so authentication failure stops it here.
-  sudo -v
+  # Authenticate by running a command rather than sudo -v: under the default
+  # verifypw=all, -v prompts for the password even when the policy grants
+  # passwordless sudo, so an unattended update cannot answer it.
+  sudo true
   sudo test -f "$limine_conf" || exit 0
 fi
 
